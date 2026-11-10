@@ -1,0 +1,114 @@
+name: zenorX - Ekstrak ZIP dan Build APK
+
+# Simpan file ini sebagai: .github/workflows/zenorx.yml
+# Cara pakai: unggah zenorX.zip ke root repo -> workflow otomatis
+# mengekstrak ZIP, commit hasilnya, lalu membuild APK.
+
+on:
+  push:
+    paths:
+      - '*.zip'
+      - 'app/**'
+      - '*.kts'
+      - 'gradle.properties'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  extract-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ekstrak ZIP di root repo
+        id: extract
+        shell: bash
+        run: |
+          shopt -s nullglob
+          zips=(*.zip)
+          if [ ${#zips[@]} -eq 0 ]; then
+            echo "Tidak ada file ZIP di root, lewati ekstrak."
+            echo "extracted=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          for z in "${zips[@]}"; do
+            echo ">> Mengekstrak $z"
+            rm -rf _zx_tmp && mkdir _zx_tmp
+            unzip -q -o "$z" -d _zx_tmp
+            rm -rf _zx_tmp/__MACOSX
+            # jika isi ZIP hanya satu folder, naikkan isinya ke root
+            src="_zx_tmp"
+            count=$(find _zx_tmp -mindepth 1 -maxdepth 1 | wc -l)
+            if [ "$count" -eq 1 ] && [ -d "$(find _zx_tmp -mindepth 1 -maxdepth 1)" ]; then
+              src="$(find _zx_tmp -mindepth 1 -maxdepth 1)"
+            fi
+            # workflow tidak boleh ditimpa dari dalam ZIP
+            rm -rf "$src/.github/workflows"
+            cp -a "$src"/. .
+            rm -rf _zx_tmp
+            rm -f "$z"
+          done
+          echo "extracted=true" >> "$GITHUB_OUTPUT"
+
+      - name: Commit hasil ekstrak
+        if: steps.extract.outputs.extracted == 'true'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Ekstrak ZIP otomatis" || echo "Tidak ada perubahan untuk di-commit"
+          git push
+
+      - name: Cek proyek Android
+        id: check
+        shell: bash
+        run: |
+          if [ -f settings.gradle.kts ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "settings.gradle.kts tidak ditemukan, build dilewati."
+          fi
+
+      - name: Setup Java 17
+        if: steps.check.outputs.ok == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle 8.7
+        if: steps.check.outputs.ok == 'true'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build APK debug
+        if: steps.check.outputs.ok == 'true'
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon --console=plain 2>&1 | tee build.log
+
+      - name: Ringkasan error (jika build gagal)
+        if: failure() && steps.check.outputs.ok == 'true'
+        shell: bash
+        run: |
+          {
+            echo '## Error build zenorX'
+            echo '```'
+            grep -E '^e: |error:|What went wrong|Execution failed|Unresolved|clash' -A2 build.log | head -60
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Unggah APK
+        if: steps.check.outputs.ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: zenorX-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          
